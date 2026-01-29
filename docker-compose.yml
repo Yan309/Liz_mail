@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  # RabbitMQ Message Queue
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    container_name: lizmail-rabbitmq
+    ports:
+      - "5672:5672"   # AMQP port
+      - "15672:15672" # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - lizmail-network
+
+  # Streamlit Web Application
+  webapp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lizmail-webapp
+    ports:
+      - "8501:8501"
+    environment:
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-guest}
+      - RABBITMQ_QUEUE=${RABBITMQ_QUEUE:-email_queue}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./uploads:/app/uploads
+    networks:
+      - lizmail-network
+    restart: unless-stopped
+
+  # Email Worker (Background Service)
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: lizmail-worker
+    environment:
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-guest}
+      - RABBITMQ_QUEUE=${RABBITMQ_QUEUE:-email_queue}
+      - MAX_RETRIES=${MAX_RETRIES:-3}
+      - PROCESSING_DELAY=${PROCESSING_DELAY:-2}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - lizmail-network
+    restart: unless-stopped
+    deploy:
+      replicas: 2  # Run 2 workers for better throughput
+
+volumes:
+  rabbitmq_data:
+
+networks:
+  lizmail-network:
+    driver: bridge
