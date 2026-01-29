@@ -49,8 +49,8 @@ Thumbs.db
 # Logs
 *.log
 
-# Streamlit (keep config for HF deployment)
-.streamlit/secrets.toml
+# Streamlit
+.streamlit/
 
 # Temporary files
 temp/
