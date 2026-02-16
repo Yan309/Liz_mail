@@ -1,8 +1,10 @@
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import time
 from typing import Dict, Any, Optional
 import logging
+import imaplib
 from config import Config
 
 logging.basicConfig(level=logging.INFO)
@@ -51,6 +53,20 @@ class EmailSender:
         
         return msg
     
+    def save_to_sent_folder(self, msg):
+        try:
+            imap = imaplib.IMAP4_SSL(Config.IMAP_HOST)
+            imap.login(self.smtp_user, self.smtp_password)
+
+            # Select Sent folder (name may vary: "Sent", "Sent Items", etc.)
+            imap.append('Sent', '', imaplib.Time2Internaldate(time.time()), msg.as_bytes())
+
+            imap.logout()
+            logger.info("Message saved to Sent folder")
+        except Exception as e:
+            logger.error(f"Failed to save to Sent folder: {e}")
+    
+    
     def send_email(self, email_data: Dict[str, Any]) -> bool:
         """
         Send an email via SMTP with retry logic.
@@ -87,12 +103,14 @@ class EmailSender:
                     with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, timeout=10) as server:
                         server.login(self.smtp_user, self.smtp_password)
                         server.send_message(msg)
+                        self.save_to_sent_folder(msg)
                 else:
                     # TLS connection (port 587 or 25)
                     with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=10) as server:
                         server.starttls()
                         server.login(self.smtp_user, self.smtp_password)
                         server.send_message(msg)
+                        self.save_to_sent_folder(msg)
                 
                 logger.info(f"Email sent successfully to {to_email}")
                 return True
@@ -110,6 +128,7 @@ class EmailSender:
                 return False
         
         return False
+    
     
     def test_connection(self) -> bool:
         """Test SMTP connection and credentials."""
