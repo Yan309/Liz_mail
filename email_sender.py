@@ -5,7 +5,6 @@ import time
 from typing import Dict, Any, Optional
 import logging
 import imaplib
-from email.utils import formatdate, make_msgid
 from config import Config
 
 logging.basicConfig(level=logging.INFO)
@@ -45,11 +44,6 @@ class EmailSender:
             msg['From'] = f"{from_name} <{self.smtp_user}>"
         else:
             msg['From'] = self.smtp_user
-        # Ensure the message has a Date and Message-ID so IMAP append works reliably
-        if 'Date' not in msg:
-            msg['Date'] = formatdate(localtime=True)
-        if 'Message-ID' not in msg:
-            msg['Message-ID'] = make_msgid()
         
         # Support both plain text and HTML
         if '<html>' in body.lower() or '<body>' in body.lower():
@@ -59,26 +53,82 @@ class EmailSender:
         
         return msg
     
-    def save_to_sent_folder(self, msg):
+    def _find_sent_folder(self, imap):
+        """Find the correct Sent folder name for the email provider."""
         try:
+            # List all folders
+            status, folders = imap.list()
+            if status != 'OK':
+                return None
+            
+            # Common Sent folder names by provider
+            sent_variations = [
+                'Sent',
+                'Sent Items',
+                'Sent Mail',
+                '[Gmail]/Sent Mail',
+                'INBOX.Sent',
+                'Sent Messages',
+            ]
+            
+            # Decode folder names and look for Sent folder
+            for folder_data in folders:
+                folder_str = folder_data.decode() if isinstance(folder_data, bytes) else str(folder_data)
+                
+                # Check each variation
+                for sent_name in sent_variations:
+                    if sent_name in folder_str:
+                        # Extract the actual folder name (handling quoted names)
+                        if '"' in folder_str:
+                            # Format: (flags) "delimiter" "folder name"
+                            parts = folder_str.split('"')
+                            if len(parts) >= 4:
+                                return parts[-2]
+                        return sent_name
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error finding Sent folder: {e}")
+            return None
+    
+    def save_to_sent_folder(self, msg):
+        """Save sent message to IMAP Sent folder."""
+        try:
+            # Connect to IMAP server
             imap = imaplib.IMAP4_SSL(Config.IMAP_HOST)
             imap.login(self.smtp_user, self.smtp_password)
 
-            # Mailbox name can vary between providers; allow override via Config
-            mailbox = getattr(Config, 'IMAP_SENT_FOLDER', 'Sent')
-            # Common flag for appended messages
-            flags = '\\Seen'
-            date_time = imaplib.Time2Internaldate(time.time())
+            # Try to find the Sent folder (different providers use different names)
+            sent_folder = self._find_sent_folder(imap)
+            
+            if not sent_folder:
+                logger.warning("Could not find Sent folder, trying default 'Sent'")
+                sent_folder = 'Sent'
 
-            typ, data = imap.append(mailbox, flags, date_time, msg.as_bytes())
-            if typ != 'OK':
-                logger.error(f"Failed to append message to mailbox '{mailbox}': {typ} {data}")
+            # Append the message to the Sent folder
+            # Format: folder_name, flags, date-time, message
+            result = imap.append(
+                sent_folder,
+                '\\Seen',  # Mark as read
+                imaplib.Time2Internaldate(time.time()),
+                msg.as_bytes()
+            )
+            
+            if result[0] == 'OK':
+                logger.info(f"Message saved to {sent_folder} folder")
             else:
-                logger.info(f"Message saved to Sent folder '{mailbox}'")
+                logger.error(f"Failed to save message: {result}")
 
             imap.logout()
+            return True
+            
+        except imaplib.IMAP4.error as e:
+            logger.error(f"IMAP error saving to Sent folder: {e}")
+            return False
         except Exception as e:
             logger.error(f"Failed to save to Sent folder: {e}")
+            return False
     
     
     def send_email(self, email_data: Dict[str, Any]) -> bool:
@@ -104,12 +154,12 @@ class EmailSender:
             logger.error("Missing required email fields")
             return False
         
-        # Retry logic
+        # Create message first (outside retry loop)
+        msg = self.create_email(to_email, subject, body, from_name)
+        
+        # Retry logic for SMTP
         for attempt in range(1, self.max_retries + 1):
             try:
-                # Create message
-                msg = self.create_email(to_email, subject, body, from_name)
-                
                 # Connect to SMTP server with timeout
                 # Use SMTP_SSL for port 465, SMTP with starttls for port 587
                 if self.smtp_port == 465:
@@ -117,16 +167,18 @@ class EmailSender:
                     with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, timeout=10) as server:
                         server.login(self.smtp_user, self.smtp_password)
                         server.send_message(msg)
-                        self.save_to_sent_folder(msg)
                 else:
                     # TLS connection (port 587 or 25)
                     with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=10) as server:
                         server.starttls()
                         server.login(self.smtp_user, self.smtp_password)
                         server.send_message(msg)
-                        self.save_to_sent_folder(msg)
                 
                 logger.info(f"Email sent successfully to {to_email}")
+                
+                # Save to Sent folder after successful send
+                self.save_to_sent_folder(msg)
+                
                 return True
                 
             except smtplib.SMTPException as e:
