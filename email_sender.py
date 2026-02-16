@@ -5,6 +5,7 @@ import time
 from typing import Dict, Any, Optional
 import logging
 import imaplib
+from email.utils import formatdate, make_msgid
 from config import Config
 
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +45,11 @@ class EmailSender:
             msg['From'] = f"{from_name} <{self.smtp_user}>"
         else:
             msg['From'] = self.smtp_user
+        # Ensure the message has a Date and Message-ID so IMAP append works reliably
+        if 'Date' not in msg:
+            msg['Date'] = formatdate(localtime=True)
+        if 'Message-ID' not in msg:
+            msg['Message-ID'] = make_msgid()
         
         # Support both plain text and HTML
         if '<html>' in body.lower() or '<body>' in body.lower():
@@ -58,11 +64,19 @@ class EmailSender:
             imap = imaplib.IMAP4_SSL(Config.IMAP_HOST)
             imap.login(self.smtp_user, self.smtp_password)
 
-            # Select Sent folder (name may vary: "Sent", "Sent Items", etc.)
-            imap.append('Sent', '', imaplib.Time2Internaldate(time.time()), msg.as_bytes())
+            # Mailbox name can vary between providers; allow override via Config
+            mailbox = getattr(Config, 'IMAP_SENT_FOLDER', 'Sent')
+            # Common flag for appended messages
+            flags = '\\Seen'
+            date_time = imaplib.Time2Internaldate(time.time())
+
+            typ, data = imap.append(mailbox, flags, date_time, msg.as_bytes())
+            if typ != 'OK':
+                logger.error(f"Failed to append message to mailbox '{mailbox}': {typ} {data}")
+            else:
+                logger.info(f"Message saved to Sent folder '{mailbox}'")
 
             imap.logout()
-            logger.info("Message saved to Sent folder")
         except Exception as e:
             logger.error(f"Failed to save to Sent folder: {e}")
     
